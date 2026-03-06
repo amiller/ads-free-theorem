@@ -9,7 +9,9 @@
 PL researchers (ICFP). People who know free theorems. The pearl is: a real security property from a real system, proved by parametricity alone.
 
 ### Core claim
-If a program is parametrically polymorphic over an "auth kit" interface, the security property (prover/verifier agreement) follows from the types alone — no separate proof needed. We formalize this in Cubical Agda using internal parametricity (agda-bridges), confirming Atkey's 2016 claim.
+If an adversary fools the verifier into accepting a wrong result, we can constructively extract a collision in the hash function. This is the standard cryptographic reduction for ADS security, formalized as induction on the computation tree (free monad of hash-checked lookups). No assumption of hash injectivity — only collision resistance.
+
+As a secondary contribution, we formalize Atkey's 2016 observation that parametricity over the auth kit guarantees correctness of honest computations (via agda-bridges). This is essentially a sanity check: honest programs compute the right answer.
 
 ### The story
 Miller had the intuition in 2013: write ADS code polymorphic over an auth monad, get security from the types. But couldn't close the gap — unclear whether the type system actually *proves* the property or merely *expresses* the right shape. The POPL 2014 paper succeeded by going operational semantics instead. Atkey (2016) claimed the parametricity argument works. We formalize it, confirming the original intuition was right all along.
@@ -111,7 +113,39 @@ The output is always "pure" — it's `ret` applied to the canonical value.
 ```
 Both equal `f IdKit x`. Prover and verifier agree.
 
-## 5. Formalization in Agda-Bridges
+## 5. Collision Extraction (the security theorem)
+
+### 5.1 The computation tree
+Model a verified computation as a free monad of hash-checked lookups:
+```
+data Comp R : Set where
+  ret  : R → Comp R
+  step : Digest → (Val → Comp R) → Comp R
+```
+Each `step d k` says: "give me a value `v` with `hash v = d`, then continue with `k v`." This is what `unauth` compiles to. The continuation captures the dependency of later digests on earlier values.
+
+### 5.2 The verifier
+```
+run : Comp R → Stream → Outcome R
+```
+Consumes values from the proof stream, checks each hash, returns the result or fails.
+
+### 5.3 Collision extraction theorem
+```
+extract : run c s₁ ≡ ok r₁ → run c s₂ ≡ ok r₂ → r₁ ≠ r₂ → Collision hash
+```
+By induction on the computation tree:
+- `ret`: both return the same value — contradiction.
+- `step d k`: both streams provide values `v₁, v₂` with `hash v₁ = d = hash v₂`.
+  - `v₁ ≠ v₂`: collision found.
+  - `v₁ = v₂`: both runs continue at the same tree node — recurse.
+
+The collision lives at the **first divergence point**. Before that, everything is identical (same digests, same tree node). Self-contained, 129 lines, no library dependencies.
+
+### 5.4 Connecting the layers
+The honest prover runs `f ProverKit x`, producing result `r` and proof stream `π`. By correctness (Section 4), `r = f IdKit x`. If an adversary provides stream `π'` and the verifier accepts result `r' ≠ r`, the extraction theorem gives a collision.
+
+## 6. Formalization of Correctness in Agda-Bridges
 
 ### 5.1 The NRGraph construction
 - `Unit,m` → `Unit,m,au` → `AuthKitNRG`
@@ -138,30 +172,32 @@ Both equal `f IdKit x`. Prover and verifier agree.
 - Noninterference: `∀ S → S → P → P` (total relation trick, 3 lines)
 - These validate the approach before tackling the full AuthKit
 
-## 6. Discussion
+## 7. Discussion
 
-### 6.1 What the formalization reveals
-- The two laws (monad left identity + auth roundtrip) are exactly what's needed — no more
-- The purity relation is the "right" logical relation (discovered through formalization, not assumed)
-- The agreement corollary is trivial once purity is established
+### 7.1 What the formalization reveals
+- The collision extraction is surprisingly simple — pure induction on the free monad, no fancy machinery
+- The key insight: at the first divergence point between two proof streams, both values pass the same hash check, giving the collision immediately
+- The correctness layer (parametricity) is a sanity check; the two laws (monad left identity + auth roundtrip) are exactly what's needed
+- The computation tree (free monad) cleanly separates the program structure from the proof stream, making the reduction transparent
 
-### 6.2 The kit pattern (generalization)
+### 7.2 The kit pattern (generalization)
 - The same recipe applies beyond ADS: identify what code shouldn't depend on, make it abstract, get invariant for free
 - Table of instances (noninterference, representation independence, effect abstraction, capability security)
 - Each row is a "conservation law" in Atkey's sense
 
-### 6.3 Practical implications
+### 7.3 Practical implications
 - For ADS library designers: the type signature is your security audit
 - For compiler writers: parametricity-preserving compilation = security-preserving compilation
 - For language designers: more parametricity = more free theorems = more security guarantees
 
-### 6.4 Limitations
-- Internal parametricity requires Cubical Agda + bridges (not mainstream)
-- The formalization covers the core theorem but not the full ADS library (trees, maps, etc.)
-- Monad laws are assumed as axioms, not derived from implementations
-- No treatment of computational effects beyond the monad interface
+### 7.4 Limitations
+- The collision extraction assumes a fixed computation tree (the program doesn't branch on external input beyond the proof stream)
+- Internal parametricity (for the correctness layer) requires Cubical Agda + bridges, which is not mainstream
+- The formalization covers the core theorems but not a full ADS library (trees, maps, etc.)
+- Monad laws are assumed as axioms, not derived from concrete implementations
+- Collision resistance is assumed, not formalized as a computational hardness assumption (no probabilistic reasoning)
 
-## 7. Related Work
+## 8. Related Work
 
 - **Miller, Hicks, Katz, Shi (POPL 2014)**: the authenticated data structures as a library paper
 - **Atkey (POPL 2014)**: "From Parametricity to Conservation Laws, via Noether's Theorem"
@@ -174,21 +210,22 @@ Both equal `f IdKit x`. Prover and verifier agree.
 - **Cagne, Lamiaux, Moeneclaey**: agda-bridges (the tool we use)
 - **VoigtlanderTheorems**: the bridgy-lib example we build on
 
-## 8. Conclusion
+## 9. Conclusion
 
-Atkey's 2016 claim is now formally verified: the security of authenticated data structures — that any polymorphic program over the auth kit produces the same pure result regardless of implementation — follows from internal parametricity. The proof is 388 lines of Cubical Agda, uses no postulates beyond the bridge primitives, and confirms that the type signature alone is a sufficient security argument.
+The security of authenticated data structures is formalized as a collision extraction theorem: if an adversary's proof stream makes the verifier accept an incorrect result, we constructively produce a collision in the hash function. The proof is 129 lines of plain Agda, by induction on the computation tree, requiring no assumptions beyond collision resistance. We also formalize Atkey's 2016 claim that parametricity over the auth kit guarantees correctness (388 lines, Cubical Agda with agda-bridges).
 
 ---
 
 ## Easy bits to draft first
-1. Section 3 (Auth Kit) — directly from the Agda code
-2. Section 4 (Free Theorem) — the math is clean and self-contained
-3. Section 5.4-5.5 (param application + warm-ups) — concrete code
-4. Section 7 (Related Work) — list is known
-5. The dictionary table (Section 6.2 or Introduction)
+1. Section 5 (Collision Extraction) — the main result, clean and self-contained
+2. Section 3 (Auth Kit) — directly from the Agda code
+3. Section 4 (Free Theorem) — math is clean
+4. Section 8 (Related Work) — list is known
+5. The dictionary table (Section 7.2 or Introduction)
 
 ## Needs more thought
-- How much Noether framing in the intro (too much → distracting, too little → loses the hook)
-- Venue / format (ICFP pearl? CSF? Workshop? Long-form essay?)
-- Whether to include Track B material (capability security, sandboxes) — probably not, keep focused
-- How to present the NRGraph construction without losing readers (Section 5.1-5.2 is dense)
+- How to position: the collision extraction is the real contribution, the parametricity is context
+- Venue / format (ICFP pearl? CSF? Workshop?)
+- Whether the Noether framing adds anything or is a distraction
+- How much space to give the agda-bridges formalization (Section 6) vs the collision extraction (Section 5)
+- How to present the NRGraph construction without losing readers (Section 6.1-6.2 is dense)

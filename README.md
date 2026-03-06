@@ -1,26 +1,29 @@
 # Authenticated Data Structures, for Free
 
-Formalizing Atkey's 2016 claim that the security of authenticated data structures follows from parametricity alone, using internal parametricity in Cubical Agda ([agda-bridges](https://music-impl.pages.gitlabpages.inria.fr/agda-music-graded/agda-bridges.html)).
+Formal security proof for authenticated data structures (Merkle trees, etc.) in Agda.
 
 ## The result
 
-A program polymorphic over an "auth kit" interface (monad `m`, wrapper `au`, operations `ret`/`bind`/`auth`/`unauth`) must produce the same pure value regardless of which kit implements it. The type signature *is* the security argument.
+If an adversary provides a proof stream that makes the verifier accept a wrong result, we can constructively extract a collision in the underlying hash function. We don't assume the hash is injective — only collision-resistant, which is the standard cryptographic assumption.
 
-**Theorem (purity):** For any lawful kit satisfying monad left-identity and auth roundtrip:
+**Theorem (collision extraction):** For any computation tree and two proof streams that both pass hash verification:
 ```
-f kit x ≡ ret (f IdKit x)
+run c s₁ ≡ ok r₁   →   run c s₂ ≡ ok r₂   →   r₁ ≠ r₂   →   Collision hash
 ```
 
-**Corollary (agreement):** Any two lawful kits (e.g. Prover, Verifier) produce the same underlying value.
+The proof is by induction on the computation tree. At the first point where the two streams diverge, both values pass the same hash check, giving a collision.
+
+We also formalize Atkey's 2016 observation that parametricity over the auth kit interface guarantees correctness of honest computations (using internal parametricity via [agda-bridges](https://music-impl.pages.gitlabpages.inria.fr/agda-music-graded/agda-bridges.html)).
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `agda/AuthFreeThm.agda` | Main result: ADS security via parametricity (388 lines, no sorry) |
+| `agda/CollisionExtraction.agda` | Main result: collision extraction from verification failure (129 lines, self-contained, no sorry) |
+| `agda/AuthFreeThm.agda` | Correctness: honest computations are pure, via parametricity (388 lines, no sorry) |
 | `agda/TinyFreeThms.agda` | Warm-up: identity and Church bool free theorems |
 | `agda/Noninterference.agda` | Noninterference from parametricity (total relation trick) |
-| `agda-check` | Script to typecheck via Docker |
+| `agda-check` | Script to typecheck via Docker (for the agda-bridges files) |
 | `notes/paper-outline.md` | ICFP pearl paper outline |
 
 ## Background
