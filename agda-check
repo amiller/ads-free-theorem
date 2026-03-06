@@ -1,0 +1,58 @@
+#!/bin/bash
+# Typecheck an Agda file using the agda-bridges compiler in Docker.
+#
+# Usage: ./agda-check [file.agda]
+# Default: agda/AuthFreeThm.agda
+#
+# Expects:
+#   ~/agda-bridges-src    — compiler source (branch bridges-with-2.6.4)
+#   deps/cubical          — cubical library
+#   deps/bridgy-lib       — bridgy-lib (with our files in Bridgy/Examples/)
+#
+# The agda/*.agda files in this repo should be symlinked or copied into
+# deps/bridgy-lib/Bridgy/Examples/ for typechecking.
+
+set -e
+REPO="$(cd "$(dirname "$0")" && pwd)"
+AGDA_SRC="${AGDA_BRIDGES_SRC:-$HOME/agda-bridges-src}"
+DEPS="$REPO/deps"
+
+# Default file; resolve relative to repo
+FILE="${1:-agda/AuthFreeThm.agda}"
+[[ "$FILE" = /* ]] || FILE="$REPO/$FILE"
+
+# Translate host path to Docker path
+DOCKER_FILE="${FILE/$DEPS\/bridgy-lib/\/libs\/bridgy-lib}"
+
+docker run --rm \
+  -v agda-bridges-stack-cache:/root/.stack \
+  -v agda-bridges-stack-work:/agda/.stack-work \
+  -v "$AGDA_SRC:/agda" \
+  -v "$DEPS/cubical:/libs/cubical" \
+  -v "$DEPS/bridgy-lib:/libs/bridgy-lib" \
+  -w /agda \
+  haskell:9.8.1-slim bash -c "
+    sed -i 's|deb.debian.org|archive.debian.org|g' /etc/apt/sources.list
+    sed -i '/security.debian.org/d' /etc/apt/sources.list
+    sed -i '/buster-updates/d' /etc/apt/sources.list
+    apt-get update -qq && apt-get install -y -qq libgmp-dev >/dev/null 2>&1
+
+    BINDIR=\$(find .stack-work/install -name bin -type d 2>/dev/null | head -1)
+    DATADIR=\$(find .stack-work/install -name 'Agda-2.6.4.3' -path '*/share/*' -type d 2>/dev/null | head -1)
+    export Agda_datadir=\"\$DATADIR\"
+    AGDA=\"\$BINDIR/agda\"
+
+    echo '/libs/cubical/cubical.agda-lib' > /tmp/libraries
+    echo '/libs/bridgy-lib/bridgy-lib.agda-lib' >> /tmp/libraries
+
+    # Pre-compile prim cubical files (needed once, cached in volume)
+    if [ ! -f \"\$DATADIR/lib/prim/_build/2.6.4.3/agda/Agda/Builtin/Cubical/HCompU.agdai\" ]; then
+      echo '--- Pre-compiling prim library (first run only) ---'
+      rm -rf \"\$DATADIR/lib/prim/_build\"
+      \$AGDA \"\$DATADIR/lib/prim/Agda/Builtin/Cubical/HCompU.agda\" 2>&1
+      \$AGDA \"\$DATADIR/lib/prim/Agda/Builtin/Cubical/Glue.agda\" 2>&1
+      echo '--- Done ---'
+    fi
+
+    \$AGDA --bridges --library-file=/tmp/libraries -l bridgy -l cubical-0.7 $DOCKER_FILE
+  "
