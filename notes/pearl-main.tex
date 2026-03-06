@@ -1,0 +1,419 @@
+\documentclass[acmsmall,screen,review,anonymous]{acmart}
+
+\citestyle{acmauthoryear}
+
+%% Packages
+\usepackage{amsmath,amssymb}
+\usepackage{mathpartir}
+
+%% Agda-style code
+\usepackage{listings}
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\bfseries,
+  columns=flexible,
+  mathescape=true,
+  literate={→}{$\to$}1 {∀}{$\forall$}1 {λ}{$\lambda$}1
+           {≡}{$\equiv$}1 {×}{$\times$}1 {Σ}{$\Sigma$}1
+           {⟧}{$\rrbracket$}1 {⟦}{$\llbracket$}1
+}
+
+\begin{document}
+
+\title{Authenticated Data Structures, for Free}
+\subtitle{An ICFP Pearl}
+
+\author{Anonymous}
+\affiliation{\institution{Anonymous}}
+
+\begin{abstract}
+Miller et al.\ (2014) built authenticated data structures---Merkle
+trees, authenticated dictionaries, and the like---as a generic
+library, with prover and verifier as two instantiations of an abstract
+\emph{auth kit} interface.  We formalize the security of this approach
+in Agda, with two results.
+
+The main theorem is a \emph{collision extraction}: if an adversary
+provides a proof stream that makes the verifier accept an incorrect
+result, we constructively produce a collision in the underlying hash
+function.  This is a standard cryptographic reduction, but the proof
+is remarkably simple---induction on the computation tree (a free monad
+of hash-checked lookups), 129 lines of plain Agda, with no
+assumptions beyond collision resistance.
+
+As a supporting result, we formalize Atkey's (2016) claim that
+parametric polymorphism over the auth kit guarantees correctness of
+honest computations, using \emph{internal parametricity}
+(agda-bridges) in Cubical Agda.
+\end{abstract}
+
+\maketitle
+
+% TODO: Introduction
+% - Miller et al. 2014 built ADS as a library
+% - Intuition: polymorphism = security, but couldn't close the gap
+% - Two contributions: (1) collision extraction — the real security theorem,
+%   (2) Atkey 2016 parametricity claim formalized — correctness of honest code
+% - Collision extraction is simple and self-contained (plain Agda)
+% - Parametricity formalization uses agda-bridges (internal parametricity)
+
+% TODO: Background
+% - ADS basics (Merkle trees, prover/verifier)
+% - Collision resistance (not injectivity!)
+% - Brief on parametricity / agda-bridges (for Section 5)
+
+% ============================================================
+\section{The Auth Kit}\label{sec:auth-kit}
+% ============================================================
+
+An authenticated data structure scheme consists of two parties---a
+\emph{prover} who maintains the data and produces Merkle-style
+certificates, and a \emph{verifier} who checks them.  The key
+observation of Miller et al.~\cite{miller2014} is that both can be
+obtained from a single generic program, written once against an
+abstract interface we call the \emph{auth kit}.
+
+The kit has two layers.  The first is a monadic computation
+environment: a type constructor $\mathsf{m}$ with $\mathsf{ret}$ and
+$\mathsf{bind}$.  Any program can be written in this environment---it
+is just a monad.  The second layer adds two operations, $\mathsf{auth}$
+and $\mathsf{unauth}$, that mark \emph{authenticated boundaries}: places
+where data crosses between a trusted local representation and an
+untrusted authenticated one.
+
+A program that never calls $\mathsf{auth}$ or $\mathsf{unauth}$ is
+perfectly well-typed.  It simply does not use the authentication
+machinery, and gains nothing from it---much like a program in
+\texttt{IO} that never performs I/O.  The \emph{performance} benefit of
+authenticated data structures comes from placing $\mathsf{auth}$ and
+$\mathsf{unauth}$ judiciously: the prover hashes at $\mathsf{auth}$
+sites and skips reconstruction at $\mathsf{unauth}$ sites.  Choosing
+where to place these calls requires a white-box understanding of the
+intended data structure---the kit interface does not dictate this.
+
+What the kit \emph{does} guarantee, generically, is \emph{security}:
+no matter how the programmer uses $\mathsf{auth}$ and $\mathsf{unauth}$,
+the prover cannot cause the verifier to accept an incorrect answer.
+This is the free theorem we formalize.
+
+\subsection{The Interface}
+
+Concretely, an auth kit bundles a monadic computation environment
+together with the auth/unauth capabilities:
+%
+\begin{align*}
+  &\textbf{Computation environment:} \\
+  \mathsf{m}       &: \mathsf{Type} \to \mathsf{Type}
+    && \text{(effect type)} \\
+  \mathsf{ret}     &: \forall X.\; X \to \mathsf{m}\,X \\
+  \mathsf{bind}    &: \forall X\,Y.\; \mathsf{m}\,X \to
+                      (X \to \mathsf{m}\,Y) \to \mathsf{m}\,Y \\[4pt]
+  &\textbf{Authentication capabilities:} \\
+  \mathsf{au}      &: \mathsf{Type} \to \mathsf{Type}
+    && \text{(authenticated wrapper)} \\
+  \mathsf{auth}    &: \forall X.\; X \to \mathsf{au}\,X \\
+  \mathsf{unauth}  &: \forall X.\; \mathsf{au}\,X \to \mathsf{m}\,X
+\end{align*}
+%
+The monad $\mathsf{m}$ captures the computational side-effects
+particular to each role: the prover threads Merkle-tree state, the
+verifier propagates hash-checking failures, and the identity kit (below)
+does nothing.  The wrapper $\mathsf{au}$ marks data as
+``authenticated''---for the prover this means a value together with its
+hash, for the verifier just the hash, and for the identity kit the bare
+value.
+
+The kit \emph{designer} makes two choices: a monad suited to the
+role (state, error, identity, etc.), and an implementation of the
+$\mathsf{auth}$/$\mathsf{unauth}$ instructions in that monad.  The
+\emph{program author} writes against the abstract interface, choosing
+where to place authenticated boundaries for the data structure at hand.
+
+In Agda:
+%
+\begin{lstlisting}
+AuthKit : Type (lsuc l)
+AuthKit = $\Sigma$ (Type l $\to$ Type l) $\lambda$ m $\to$
+  $\Sigma$ (Type l $\to$ Type l) $\lambda$ au $\to$
+      (($\forall$ X $\to$ X $\to$ m X)                    -- ret
+    $\times$ (($\forall$ X Y $\to$ m X $\to$ (X $\to$ m Y) $\to$ m Y)  -- bind
+    $\times$ (($\forall$ X $\to$ X $\to$ au X)                  -- auth
+    $\times$ (($\forall$ X $\to$ au X $\to$ m X))))              -- unauth
+\end{lstlisting}
+
+\subsection{The Identity Kit}
+
+The simplest kit sets both $\mathsf{m}$ and $\mathsf{au}$ to the
+identity---no effects, no wrapping:
+%
+\begin{lstlisting}
+IdKit : AuthKit
+IdKit = ($\lambda$ X $\to$ X) , ($\lambda$ X $\to$ X) ,
+  ($\lambda$ X x $\to$ x) , ($\lambda$ X Y x k $\to$ k x) ,
+  ($\lambda$ X x $\to$ x) , ($\lambda$ X x $\to$ x)
+\end{lstlisting}
+%
+Running a polymorphic program with \texttt{IdKit} strips away all
+authentication machinery and yields the ``pure'' result.  This is the
+reference computation: the answer the verifier should get.
+
+\subsection{Lawful Kits}
+
+We require two laws:
+%
+\begin{enumerate}
+\item \textbf{Monad left identity.}\;
+  $\mathsf{bind}\;(\mathsf{ret}\;x)\;k \;=\; k\;x$
+\item \textbf{Auth roundtrip.}\;
+  $\mathsf{unauth}\;(\mathsf{auth}\;x) \;=\; \mathsf{ret}\;x$
+\end{enumerate}
+%
+The first is a standard monad law.  The second says that wrapping a
+value and immediately unwrapping it is a no-op (up to the monadic
+return)---an authenticated value round-trips faithfully.  These are
+precisely the laws the formalization needs: monad left identity is used
+once (for $\mathsf{bind}$ compatibility) and the auth roundtrip is used
+once (for $\mathsf{unauth}$ compatibility).  No further monad laws or
+naturality conditions appear.
+
+\subsection{Polymorphic Programs}
+
+A program written against the auth kit has the type
+\[
+  f : \forall\, \mathit{kit}.\; A \to \mathsf{m}_{\mathit{kit}}\,A
+\]
+for some fixed type $A$.  The program receives a kit and may use any of
+its operations.  Crucially, it is parametrically polymorphic over the
+kit: it cannot inspect which implementation it received, nor behave
+differently for the prover than for the verifier.  This is the
+structural constraint that gives us the security theorem for free.
+
+% ============================================================
+\section{Collision Extraction}\label{sec:extraction}
+% ============================================================
+
+The security theorem for authenticated data structures is a
+\emph{reduction}: if an adversary fools the verifier into accepting a
+wrong answer, we extract a collision in the hash function.  We do not
+assume the hash is injective---only that finding collisions is hard.
+
+\subsection{Computation Trees}
+
+We model a verified computation as a free monad of hash-checked
+lookups:
+%
+\begin{lstlisting}
+data Comp (R : Set) : Set where
+  ret  : R $\to$ Comp R
+  step : Digest $\to$ (Val $\to$ Comp R) $\to$ Comp R
+\end{lstlisting}
+%
+A $\mathsf{ret}\;r$ returns the result $r$.  A
+$\mathsf{step}\;d\;k$ says ``give me a value $v$ with
+$\mathsf{hash}\;v = d$, then continue with $k\;v$.''  This is what
+each $\mathsf{unauth}$ call compiles to: the digest $d$ was computed
+by an earlier $\mathsf{auth}$, and the continuation $k$ captures the
+rest of the program, including any future digests that may depend on
+$v$.
+
+\subsection{The Verifier}
+
+The verifier runs a computation against a \emph{proof stream}---a list
+of values provided by a prover (honest or adversarial):
+%
+\begin{lstlisting}
+run : Comp R $\to$ List Val $\to$ Outcome R
+run (ret r)    s       = ok r s
+run (step d k) []      = fail
+run (step d k) (v :: s) with d $\stackrel{?}{=}$ hash v
+... | yes _ = run (k v) s
+... | no  _ = fail
+\end{lstlisting}
+%
+At each step, the verifier pops a value from the stream, checks that
+its hash matches the expected digest, and continues.
+
+\subsection{The Theorem}
+
+\begin{theorem}[Collision extraction]\label{thm:extraction}
+For any computation $c$, if two proof streams $s_1, s_2$ both pass
+verification but produce different results, there exists a collision
+in $\mathsf{hash}$:
+\[
+  \mathsf{run}\;c\;s_1 = \mathsf{ok}\;r_1
+  \;\;\wedge\;\;
+  \mathsf{run}\;c\;s_2 = \mathsf{ok}\;r_2
+  \;\;\wedge\;\;
+  r_1 \neq r_2
+  \;\;\Longrightarrow\;\;
+  \exists\, x\,y.\;\; x \neq y \;\wedge\; \mathsf{hash}\;x = \mathsf{hash}\;y
+\]
+\end{theorem}
+
+\begin{proof}
+By induction on the computation tree $c$.
+
+\textbf{Case} $\mathsf{ret}\;r$: both runs return $r$, so
+$r_1 = r = r_2$, contradicting $r_1 \neq r_2$.
+
+\textbf{Case} $\mathsf{step}\;d\;k$: both streams provide values
+$v_1, v_2$ that pass the hash check, so
+$\mathsf{hash}\;v_1 = d = \mathsf{hash}\;v_2$.
+\begin{itemize}
+\item If $v_1 \neq v_2$: collision found.
+\item If $v_1 = v_2$: both runs continue at the same tree node
+  $k\;v_1$ with the remaining streams.  The results still differ,
+  so the inductive hypothesis yields a collision.
+\end{itemize}
+The collision lives at the \emph{first divergence point} between
+the two streams.  Before that point, both runs follow identical
+paths through the tree, so the expected digest is the same---this
+is what makes the hash equality valid.
+\end{proof}
+
+\subsection{Connecting to the Security Game}
+
+The standard ADS security game is:
+\begin{enumerate}
+\item Fix a hash function $h$ (chosen at random from a family).
+\item The honest prover runs $f$ with the prover kit, producing
+  result $r$ and proof stream $\pi$.
+\item An adversary (arbitrary, not parametric over the kit) produces
+  a different proof stream $\pi'$.
+\item The verifier runs $f$ with $\pi'$ and accepts result $r'$.
+\item If $r' \neq r$, Theorem~\ref{thm:extraction} extracts a
+  collision in $h$.
+\end{enumerate}
+The adversary need not be a program written against the auth kit
+interface.  It simply provides a proof stream---a list of values.
+The collision is extracted from the two streams (honest and
+adversarial) together.
+
+Note that correctness of the honest computation---that the prover
+produces the right answer---is a separate property.  We address it
+in Section~\ref{sec:free-theorem} via parametricity.
+
+% ============================================================
+\section{Correctness via Parametricity}\label{sec:free-theorem}
+% ============================================================
+
+\subsection{Statement}
+
+\begin{theorem}[Purity]\label{thm:purity}
+Let $\mathit{kit}$ be a lawful auth kit and
+$f : \forall\,\mathit{kit}.\;A \to \mathsf{m}_{\mathit{kit}}\,A$
+be parametrically polymorphic.  Then for every $x : A$:
+\[
+  f\;\mathit{kit}\;x \;=\;
+    \mathsf{ret}_{\mathit{kit}}\!\bigl(f\;\mathit{IdKit}\;x\bigr)
+\]
+\end{theorem}
+
+\begin{corollary}[Agreement]\label{cor:agreement}
+For any two lawful kits $\mathit{kit}_1, \mathit{kit}_2$:
+\[
+  \mathit{pure}(f\;\mathit{kit}_1\;x) \;=\;
+  \mathit{pure}(f\;\mathit{kit}_2\;x) \;=\;
+  f\;\mathit{IdKit}\;x
+\]
+\end{corollary}
+
+\begin{proof}
+Apply Theorem~\ref{thm:purity} to each kit.
+\end{proof}
+
+\subsection{The Purity Relation}\label{sec:purity-rel}
+
+The proof constructs a logical relation between an arbitrary lawful
+kit and \texttt{IdKit}.  For each type constructor:
+
+\paragraph{For $\mathsf{m}$.}
+$\mathit{mx}_0 : \mathsf{m}_{\mathit{kit}}\,X_0$ relates to
+$x_1 : X_1$ when there exists $x_0$ such that
+$\mathsf{ret}\;x_0 = \mathit{mx}_0$ and $R\;x_0\;x_1$.
+That is, $\mathit{mx}_0$ is pure.
+
+\paragraph{For $\mathsf{au}$.}
+$\mathit{ax}_0 : \mathsf{au}_{\mathit{kit}}\,X_0$ relates to
+$x_1 : X_1$ when there exists $x_0$ such that
+$\mathsf{auth}\;x_0 = \mathit{ax}_0$ and $R\;x_0\;x_1$.
+
+\subsection{Compatibility}
+
+Each operation must respect the relation.
+
+\paragraph{$\mathsf{ret}$.}
+Immediate: the witness is $x_0$ itself.
+
+\paragraph{$\mathsf{auth}$.}
+Immediate: same argument.
+
+\paragraph{$\mathsf{bind}$.}
+Given $\mathit{mx}_0 = \mathsf{ret}\;x_0$ (from the $\mathsf{m}$
+relation) and a continuation $k_0$ that preserves the relation:
+\[
+  \mathsf{bind}\;(\mathsf{ret}\;x_0)\;k_0
+  \;=\; k_0\;x_0
+  \qquad\text{(monad left identity)}
+\]
+Then $k_0\;x_0 = \mathsf{ret}\;y_0$ (from the hypothesis on $k_0$),
+so $\mathsf{bind}\;\mathit{mx}_0\;k_0 = \mathsf{ret}\;y_0$.
+\emph{Uses monad left identity once.}
+
+\paragraph{$\mathsf{unauth}$.}
+Given $\mathit{ax}_0 = \mathsf{auth}\;x_0$ (from the $\mathsf{au}$
+relation):
+\[
+  \mathsf{unauth}\;(\mathsf{auth}\;x_0) = \mathsf{ret}\;x_0
+  \qquad\text{(auth roundtrip)}
+\]
+\emph{Uses the auth roundtrip law once.}
+
+\subsection{Assembling the Proof}
+
+With all four compatibility proofs, the parametricity principle
+(instantiated at the purity relation) yields:
+\[
+  R_{\mathsf{m}}\bigl(f\;\mathit{kit}\;x,\;\;f\;\mathit{IdKit}\;x\bigr)
+\]
+Unfolding: $f\;\mathit{kit}\;x = \mathsf{ret}\;a$ where
+$a = f\;\mathit{IdKit}\;x$.  \qed
+
+\medskip
+The two laws are precisely calibrated: each is used exactly once, in
+the one compatibility proof that needs it.
+
+% ============================================================
+\section{Formalization of Correctness}\label{sec:formalization}
+% ============================================================
+
+% TODO: The NRGraph encoding in agda-bridges
+% - AuthKitNRG construction (Unit,m → Unit,m,au → full kit)
+% - The edge-kit-Id term (the purity relation, formalized)
+% - The param call and what it returns
+% - Theorem1-canonical and values-agree
+% This is supporting material — the collision extraction is the main result
+
+% ============================================================
+\section{Discussion}\label{sec:discussion}
+% ============================================================
+
+% TODO:
+% - The collision extraction is remarkably simple — why?
+%   The free monad cleanly separates program structure from proof stream
+% - Collision resistance vs injectivity: we never assume hash injectivity
+% - The first-divergence-point argument: before divergence, everything identical
+% - Limitations: fixed computation tree, no probabilistic reasoning,
+%   collision resistance assumed not formalized as computational hardness
+% - The kit pattern as a general methodology
+
+% ============================================================
+\section{Related Work}\label{sec:related}
+% ============================================================
+
+% TODO
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{refs}
+
+\end{document}
