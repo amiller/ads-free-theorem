@@ -1,10 +1,8 @@
 # Authenticated Data Structures, Generically
 
-Agda formalization of soundness for authenticated data structures (generalized Merkle trees). The main theorem is **collision extraction**: if a verifier accepts two different results for the same query, we extract two distinct values with the same hash. This is the standard cryptographic security reduction, formalized as structural induction on a free monad of hash-checked lookups.
+Agda formalization of soundness for authenticated data structures (Merkle trees). The main theorem is **collision extraction**: if a verifier accepts two different results for the same query, we extract a hash collision. Plain Agda, no sorry, 284 lines.
 
-We compare two approaches to making this generic — parametric abstraction over references (following Atkey 2016) vs. polynomial functor codes — and show that only the latter produces efficient provers matching real Merkle tree protocols.
-
-## The Merkle BST protocol
+## The protocol
 
 A binary search tree where each node is identified by its hash digest:
 
@@ -16,19 +14,15 @@ A binary search tree where each node is identified by its hash digest:
   ...     ...         ← full tree (prover has this)
 ```
 
-**Prover** holds the full tree. To answer a lookup query, it traverses the tree and records each visited node in a *proof stream*.
+**Prover** holds the full tree. To answer a lookup, it traverses and records each visited node in a *proof stream* — one shallow encoding per node, O(log N) total.
 
-**Verifier** holds only the root digest. It replays the traversal: for each step, it pops a node from the proof stream, checks `hash(node) == expected digest`, then descends into the appropriate child digest.
+**Verifier** holds only the root digest. It pops nodes from the proof stream, checks hashes, and descends into child digests.
 
-**Soundness:** if the verifier accepts two different answers for the same root digest, the two proof streams contain a pair of distinct values with the same hash.
+**Soundness:** two accepted answers for the same root → hash collision.
 
-## Two approaches
+## Design: Atkey-style Kit with `Enc`
 
-We present two ways to define generic authenticated data structures, each with different trade-offs.
-
-### Approach 1: Parametric AuthKit (`GenericADS.agda`)
-
-Define an `AuthKit` record with `Ref : Set → Set` and write data structures polymorphic over `Ref`:
+Data structures are natural Agda types, parametric over `Ref : Set → Set`:
 
 ```agda
 data BST (F : Set → Set) : Set where
@@ -36,124 +30,72 @@ data BST (F : Set → Set) : Set where
   node : F (BST F) → ℕ → F (BST F) → BST F
 ```
 
-This is elegant — write once, instantiate with verifier or prover kit. But it has a fundamental efficiency problem: the prover's `unauth a = (a, [encode a])` serializes the **entire subtree** at each step, making authenticated lookups O(N) instead of O(log N). Atkey's parametricity approach has the same limitation — `unauth : {A} → Ref A → M A` is parametric in `A` and cannot do shallow encoding.
-
-### Approach 2: Polynomial functor codes (`EfficientADS.agda`)
-
-Define data structures as fixpoints of polynomial functor codes:
+The `Kit` record provides `auth`/`unauth` parameterized by an `Enc` record (type-specific serialization), plus `ref-dig` to extract a digest from any reference:
 
 ```agda
-data Code : Set₁ where
-  U : Code  ;  K : Set → Code  ;  I : Code
-  _⊕_ _⊗_ : Code → Code → Code
+record Enc (A : Set) : Set where
+  field ser : A → Val ; des : Val → A
 
-bstC : Code
-bstC = K ℕ ⊕ (I ⊗ K ℕ ⊗ I)    -- leaf n | node left key right
-```
-
-The prover uses **annotated trees** (`AFix c`) where each child carries `(subtree, digest)`. Operations are written once via a `Kit` record with `Ref : Code → Set` and `unauth`:
-
-```agda
 record Kit : Set₁ where
   field
-    Ref      : Code → Set
-    M        : Set → Set
-    ret'     : {R : Set} → R → M R
-    bind     : {R S : Set} → M R → (R → M S) → M S
-    unauth : (c : Code) → Ref c → M (⟦ c ⟧ (Ref c))
+    Ref     : Set → Set
+    M       : Set → Set
+    auth    : {A : Set} → Enc A → A → Ref A
+    unauth  : {A : Set} → Enc A → Ref A → M A
+    ref-dig : {A : Set} → Ref A → Digest
+    ...
 ```
 
-The prover's `unauth` emits ONE encoded functor layer per step — O(1), matching real Merkle tree protocols. The verifier's `unauth` checks a hash and decodes. Operations like `lookup` are written once in a parameterized module and work with either kit.
+Each data structure provides an `Enc` instance that serializes one layer shallowly using `ref-dig` for children:
 
-### The trade-off
+```agda
+encBST : Enc (BST Ref)
+encBST = record { ser = go ; des = decode }
+  where
+  go (leaf n)     = encode (inl n)
+  go (node l k r) = encode (inr (ref-dig l , k , ref-dig r))  -- O(1)!
+```
 
-| | **Parametric (GenericADS)** | **Functor codes (EfficientADS)** |
-|---|---|---|
-| Data structure syntax | Natural Agda `data` | Codes: `K ℕ ⊕ (I ⊗ K ℕ ⊗ I)` |
-| Write once? | Yes (polymorphic in Ref) | Yes (parameterized by Kit) |
-| Prover efficiency | O(N) per query | O(log N) per query |
-| Composition | Free (nest `F`) | Parameterized codes |
+**ProverKit**: `Ref A = A × Digest`. `ref-dig = snd` extracts the cached digest in O(1), so `ser` never recurses into children. Each `unauth` emits one shallow encoding — O(log N) for a search path.
 
-Both are write-once, but only the functor code approach produces efficient provers. The cost is uglier data structure definitions. A conjectured middle ground: a `deriving`-like mechanism (cf. GHC Generics, or Agda levitation) that extracts polynomial functor codes from ordinary data type definitions.
+**VerifierKit**: `Ref A = Digest`. `unauth` pops from the proof stream and checks the hash.
 
-## The soundness theorem
+## Collision extraction
 
-A computation tree is a free monad of hash-checked lookups:
+The verifier produces a computation tree — a free monad of hash-checked lookups:
 
 ```agda
 data Comp (R : Set) : Set where
   ret  : R → Comp R
   step : Digest → (Val → Comp R) → Comp R
-```
 
-The verifier runs a computation against a proof stream, checking each hash:
-
-```agda
-run : Comp R → List Val → Outcome R
-run (ret r)    s       = ok r s
-run (step d k) []      = fail
-run (step d k) (v ∷ s) = if hash v == d then run (k v) s else fail
-```
-
-**Collision extraction:** if two proof streams both pass verification for the same computation but produce different results, we extract a hash collision.
-
-```agda
 extract : (c : Comp R) (s₁ s₂ : List Val)
   → run c s₁ ≡ ok r₁  → run c s₂ ≡ ok r₂  → r₁ ≠ r₂  → Collision
 ```
 
-Proof: induction on the computation tree. At each `step d k`, both streams provide values `v₁, v₂` with `hash v₁ = d = hash v₂`. Either `v₁ ≠ v₂` (collision found) or `v₁ = v₂` (recurse). The collision lives at the first divergence point.
-
-## Comparison with Atkey (2016)
-
-Atkey [claimed](https://bentnib.org/posts/2016-04-12-authenticated-data-structures-as-a-library.html) that parametricity over the auth interface gives security "for free." We formalize this claim (in `AtkeyCorrectness.agda` using agda-bridges) but find it proves something weaker than soundness:
-
-- **Atkey's result** requires a "round-trip law": `unauth (auth x) ≡ ret x`. The verifier does not satisfy this — its `unauth` reads from an external proof stream, not from `auth`'s output. The law holds for honest kits (prover, identity) but not for the adversarial case.
-
-- **Our result** (collision extraction) requires no laws at all. It works directly on the computation tree produced by the verifier kit. The security reduction is: wrong answer accepted → collision in hash. This is the standard cryptographic argument, formalized as 30 lines of induction.
+Induction on the tree: at each `step`, both streams provide `v₁, v₂` with `hash v₁ = d = hash v₂`. Either `v₁ ≠ v₂` (collision) or `v₁ = v₂` (recurse).
 
 ## Files
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `agda/EfficientADS.agda` | 313 | Polynomial functor codes, efficient O(log N) prover, collision extraction. Plain Agda, no sorry. |
-| `agda/GenericADS.agda` | 286 | Parametric AuthKit, collision extraction, O(N) prover. Plain Agda, no sorry. |
-| `agda/AtkeyCorrectness.agda` | 388 | Atkey's parametricity claim formalized via agda-bridges. No sorry. |
-| `agda/TinyFreeThms.agda` | — | Warm-up: identity and Church bool free theorems |
-| `agda/Noninterference.agda` | — | Noninterference from parametricity |
+| `agda/AtkeyADS.agda` | 284 | **Main formalization.** Natural data types + efficient prover + collision extraction. Plain Agda, no sorry. |
+| `agda/GenericADS.agda` | 286 | Earlier version with O(N) prover bug (parametric `encode` serializes entire subtrees). |
+| `agda/EfficientADS.agda` | 313 | Fixes O(N) via polynomial functor codes, but loses natural data types. |
+| `agda/AtkeyCorrectness.agda` | 388 | Atkey's parametricity claim (agda-bridges). Round-trip law critique. |
 
 ## Development
 
-`EfficientADS.agda` and `GenericADS.agda` are **plain Agda** — any standard Agda installation can typecheck them:
+`AtkeyADS.agda`, `GenericADS.agda`, and `EfficientADS.agda` are plain Agda:
 
 ```bash
-agda agda/EfficientADS.agda
-agda agda/GenericADS.agda
+agda agda/AtkeyADS.agda
 ```
 
-`AtkeyCorrectness.agda` requires a patched Agda with bridge types. See the `agda-check` script and setup notes below.
-
-<details>
-<summary>agda-bridges setup (for AtkeyCorrectness.agda only)</summary>
-
-Requires Docker and ~4GB disk.
-
-```bash
-# 1. Get compiler source
-git clone https://music-impl.pages.gitlabpages.inria.fr/agda-music-graded/agda-bridges.git ~/agda-bridges-src
-cd ~/agda-bridges-src && git checkout bridges-with-2.6.4
-
-# 2. Build (see agda-check script for Docker invocation)
-# 3. Get cubical + bridgy-lib libraries
-# 4. Typecheck
-./agda-check agda/AtkeyCorrectness.agda
-```
-
-</details>
+`AtkeyCorrectness.agda` requires a patched Agda with bridge types — see `agda-check`.
 
 ## References
 
-- Miller, Hicks, Katz, Shi — [Authenticated Data Structures, Generically, with Bilinear Accumulators](https://amiller.github.io/lambda-auth/) (POPL 2014)
-- Atkey — [Authenticated Data Structures, Generically](https://bentnib.org/posts/2016-04-12-authenticated-data-structures-as-a-library.html) (2016 blog)
-- Miller — [generic-ads](https://github.com/amiller/generic-ads) (2013 Haskell implementation)
-- Miller — [redblackmerkle](https://github.com/amiller/redblackmerkle) (2012 Python/Haskell/C++ implementation)
+- Miller, Hicks, Katz, Shi — [Authenticated Data Structures, Generically](https://amiller.github.io/lambda-auth/) (POPL 2014)
+- Atkey — [Authenticated Data Structures, Generically](https://bentnib.org/posts/2016-04-12-authenticated-data-structures-as-a-library.html) (2016)
+- Gregersen, Bowman et al. — [Authenticated Data Structures for Stateful Contracts](https://arxiv.org/abs/2501.10802) (2025)
