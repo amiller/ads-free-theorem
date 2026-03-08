@@ -1,99 +1,144 @@
-# Authenticated Data Structures, for Free
+# Generic Authenticated Data Structures
 
-Formal security proof for authenticated data structures (Merkle trees, etc.) in Agda.
+Soundness proof for authenticated data structures in Agda: if an adversary fools the verifier, we extract a hash collision. The formalization provides a generic `AuthKit` interface — write a data structure once, get prover and verifier for free — and proves soundness for any program built against it.
 
-## The result
+## The Merkle BST protocol
 
-If an adversary provides a proof stream that makes the verifier accept a wrong result, we can constructively extract a collision in the underlying hash function. We don't assume the hash is injective — only collision-resistant, which is the standard cryptographic assumption.
+A binary search tree where each node is identified by its hash digest:
 
-**Theorem (collision extraction):** For any computation tree and two proof streams that both pass hash verification:
 ```
-run c s₁ ≡ ok r₁   →   run c s₂ ≡ ok r₂   →   r₁ ≠ r₂   →   Collision hash
+     h(root)
+      /   \
+   h(L)   h(R)       ← digests
+   / \     / \
+  ...     ...         ← full tree (prover has this)
 ```
 
-The proof is by induction on the computation tree. At the first point where the two streams diverge, both values pass the same hash check, giving a collision.
+**Prover** holds the full tree. To answer a lookup query, it traverses the tree and records each visited node in a *proof stream*.
 
-We also formalize Atkey's 2016 observation that parametricity over the auth kit interface guarantees correctness of honest computations (using internal parametricity via [agda-bridges](https://music-impl.pages.gitlabpages.inria.fr/agda-music-graded/agda-bridges.html)).
+**Verifier** holds only the root digest. It replays the traversal: for each step, it pops a node from the proof stream, checks `hash(node) == expected digest`, then descends into the appropriate child digest.
+
+**Soundness claim:** if the verifier accepts a wrong answer, then the proof stream contains two different values with the same hash — a collision.
+
+## The generic interface
+
+Rather than hardcoding BSTs, we define an `AuthKit` that any data structure can use:
+
+```agda
+record AuthKit : Set₁ where
+  field
+    Ref    : Set → Set                                  -- authenticated reference
+    M      : Set → Set                                  -- computation monad
+    pure   : {R : Set} → R → M R
+    _>>=_  : {R S : Set} → M R → (R → M S) → M S
+    auth   : {A : Set} → A → Ref A                     -- wrap (hash or keep)
+    unauth : {A : Set} → Ref A → M A                   -- unwrap (verify or return)
+```
+
+Two concrete kits:
+
+| | **Verifier** | **Prover** |
+|---|---|---|
+| `Ref A` | `Digest` | `A` |
+| `M R` | `Comp R` (free monad) | `R × List Val` (writer) |
+| `auth a` | `hash (encode a)` | `a` |
+| `unauth ref` | `step ref (decode ∘ ret)` | `(a, [encode a])` |
+
+A data structure is defined once, polymorphic over `Ref`:
+
+```agda
+data BST (F : Set → Set) : Set where
+  leaf : ℕ → BST F
+  node : F (BST F) → ℕ → F (BST F) → BST F
+```
+
+Operations use `auth`/`unauth` from any kit:
+
+```agda
+lookup : (k : AuthKit) → ℕ → Ref (BST Ref) → M ℕ
+lookup k q ref = unauth ref >>= λ where
+  (leaf n)       → pure n
+  (node l key r) → if q < key then lookup k q l else lookup k q r
+```
+
+Instantiate with `VerifierKit` → get a `Comp ℕ` (computation tree of hash-checked lookups). This composes freely: a list of BSTs, a tree of lists, etc. The proof stream is flat `List Val` regardless of the types involved.
+
+## The soundness theorem
+
+A computation tree is a free monad of hash-checked lookups:
+
+```agda
+data Comp (R : Set) : Set where
+  ret  : R → Comp R
+  step : Digest → (Val → Comp R) → Comp R
+```
+
+The verifier runs a computation against a proof stream, checking each hash:
+
+```agda
+run : Comp R → List Val → Outcome R
+run (ret r)    s       = ok r s
+run (step d k) []      = fail
+run (step d k) (v ∷ s) = if hash v == d then run (k v) s else fail
+```
+
+**Collision extraction:** if two proof streams both pass verification for the same computation but produce different results, we extract a hash collision.
+
+```agda
+extract : (c : Comp R) (s₁ s₂ : List Val)
+  → run c s₁ ≡ ok r₁  → run c s₂ ≡ ok r₂  → r₁ ≠ r₂  → Collision
+```
+
+Proof: induction on the computation tree. At each `step d k`, both streams provide values `v₁, v₂` with `hash v₁ = d = hash v₂`. Either `v₁ ≠ v₂` (collision found) or `v₁ = v₂` (recurse). The collision lives at the first divergence point.
+
+## Comparison with Atkey (2016)
+
+Atkey [claimed](https://bentnib.org/posts/2016-04-12-authenticated-data-structures-as-a-library.html) that parametricity over the auth interface gives security "for free." We formalize this claim (in `AtkeyCorrectness.agda` using agda-bridges) but find it proves something weaker than soundness:
+
+- **Atkey's result** requires a "round-trip law": `unauth (auth x) ≡ ret x`. The verifier does not satisfy this — its `unauth` reads from an external proof stream, not from `auth`'s output. The law holds for honest kits (prover, identity) but not for the adversarial case.
+
+- **Our result** (collision extraction) requires no laws at all. It works directly on the computation tree produced by the verifier kit. The security reduction is: wrong answer accepted → collision in hash. This is the standard cryptographic argument, formalized as 30 lines of induction.
 
 ## Files
 
-| File | Description |
-|------|-------------|
-| `agda/CollisionExtraction.agda` | Main result: collision extraction from verification failure (129 lines, self-contained, no sorry) |
-| `agda/AuthFreeThm.agda` | Correctness: honest computations are pure, via parametricity (388 lines, no sorry) |
-| `agda/TinyFreeThms.agda` | Warm-up: identity and Church bool free theorems |
-| `agda/Noninterference.agda` | Noninterference from parametricity (total relation trick) |
-| `agda-check` | Script to typecheck via Docker (for the agda-bridges files) |
-| `notes/paper-outline.md` | ICFP pearl paper outline |
+| File | Lines | Description |
+|------|-------|-------------|
+| `agda/GenericADS.agda` | 278 | Main formalization: kit interface, kits, collision extraction, BST, composed list-of-BSTs example. Self-contained, plain Agda, no sorry. |
+| `agda/AtkeyCorrectness.agda` | 388 | Atkey's parametricity claim formalized via agda-bridges. Proves honest computations are pure. Requires cubical Agda + bridges. No sorry. |
+| `agda/TinyFreeThms.agda` | — | Warm-up: identity and Church bool free theorems |
+| `agda/Noninterference.agda` | — | Noninterference from parametricity |
 
-## Background
+## Development
 
-- Miller, Hicks, Katz, Shi — [Authenticated Data Structures, as a Library](https://dl.acm.org/doi/10.1145/2535838.2535851) (POPL 2014)
-- Atkey — [From Parametricity to Conservation Laws, via Noether's Theorem](https://dl.acm.org/doi/10.1145/2535838.2535867) (POPL 2014)
-- Atkey — [Authenticated Data Structures, Generically](https://bentnib.org/posts/2016-04-12-authenticated-data-structures-as-a-library.html) (2016 blog post) — the claim we formalize
-- Cagne, Lamiaux, Moeneclaey — [agda-bridges](https://music-impl.pages.gitlabpages.inria.fr/agda-music-graded/agda-bridges.html) — internal parametricity for Cubical Agda
-
-## Development setup
-
-These files require a patched version of Agda with bridge types (internal parametricity). The setup uses Docker to build and run the compiler.
-
-### Prerequisites
-
-- Docker
-- ~4GB disk for the Haskell build cache
-
-### 1. Get the compiler source
+`GenericADS.agda` is **plain Agda** — any standard Agda installation can typecheck it:
 
 ```bash
+agda agda/GenericADS.agda
+```
+
+`AtkeyCorrectness.agda` requires a patched Agda with bridge types. See the `agda-check` script and setup notes below.
+
+<details>
+<summary>agda-bridges setup (for AtkeyCorrectness.agda only)</summary>
+
+Requires Docker and ~4GB disk.
+
+```bash
+# 1. Get compiler source
 git clone https://music-impl.pages.gitlabpages.inria.fr/agda-music-graded/agda-bridges.git ~/agda-bridges-src
-cd ~/agda-bridges-src
-git checkout bridges-with-2.6.4
+cd ~/agda-bridges-src && git checkout bridges-with-2.6.4
+
+# 2. Build (see agda-check script for Docker invocation)
+# 3. Get cubical + bridgy-lib libraries
+# 4. Typecheck
+./agda-check agda/AtkeyCorrectness.agda
 ```
 
-Two patches are needed in `~/agda-bridges-src` to handle `primMHComp` ordering:
+</details>
 
-**`src/full/Agda/TypeChecking/Rules/Record.hs:466`** — add `whenDefined` guard for mhocom generation
+## References
 
-**`src/full/Agda/TypeChecking/Primitive/Cubical.hs:171-173`** — fall back to standard hcomp when `primMHComp` not yet bound
-
-### 2. Build the compiler
-
-```bash
-docker run --rm \
-  -v agda-bridges-stack-cache:/root/.stack \
-  -v agda-bridges-stack-work:/agda/.stack-work \
-  -v ~/agda-bridges-src:/agda \
-  -w /agda haskell:9.8.1-slim bash -c '
-    sed -i "s|deb.debian.org|archive.debian.org|g" /etc/apt/sources.list
-    sed -i "/security.debian.org/d" /etc/apt/sources.list
-    sed -i "/buster-updates/d" /etc/apt/sources.list
-    apt-get update -qq && apt-get install -y -qq libgmp-dev zlib1g-dev libncurses5-dev gcc make >/dev/null 2>&1
-    cp stack-9.8.1.yaml stack.yaml && stack install --system-ghc --fast 2>&1'
-```
-
-Full build takes ~20 min; incremental ~2 min. Exit code 42 at the end is expected.
-
-### 3. Get the libraries
-
-```bash
-# Cubical Agda library
-git clone https://github.com/agda/cubical.git deps/cubical
-cd deps/cubical && git checkout a10e25a8 && cd ../..
-
-# bridgy-lib (ROTT framework)
-# Copy from agda-bridges distribution or clone separately
-git clone <bridgy-lib-repo> deps/bridgy-lib
-```
-
-Then copy (or symlink) the `agda/*.agda` files from this repo into `deps/bridgy-lib/Bridgy/Examples/`.
-
-### 4. Typecheck
-
-```bash
-./agda-check                          # defaults to AuthFreeThm.agda
-./agda-check agda/TinyFreeThms.agda   # or specify a file
-```
-
-### Gotcha: `--bridges` flag is infective
-
-The `--bridges` flag propagates to all imports. The prim library (`HCompU.agda`, `Glue.agda`) must be pre-compiled *without* `--bridges` first, or you get a cryptic error about `Σ` and Erased Cubical Agda. The `agda-check` script handles this automatically on first run.
+- Miller, Hicks, Katz, Shi — [Authenticated Data Structures, Generically, with Bilinear Accumulators](https://amiller.github.io/lambda-auth/) (POPL 2014)
+- Atkey — [Authenticated Data Structures, Generically](https://bentnib.org/posts/2016-04-12-authenticated-data-structures-as-a-library.html) (2016 blog)
+- Miller — [generic-ads](https://github.com/amiller/generic-ads) (2013 Haskell implementation)
+- Miller — [redblackmerkle](https://github.com/amiller/redblackmerkle) (2012 Python/Haskell/C++ implementation)
