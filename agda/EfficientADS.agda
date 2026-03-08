@@ -5,7 +5,7 @@
 --
 -- Here, data structures are defined as fixpoints of polynomial functor codes.
 -- The prover uses annotated trees (each child carries subtree + digest) and
--- emits ONE functor layer per destruct — O(1) per step, O(log N) for a search.
+-- emits ONE functor layer per unauth — O(1) per step, O(log N) for a search.
 --
 -- The collision extraction theorem is identical: it depends only on Comp,
 -- not on how the data structure or prover is organized.
@@ -211,9 +211,9 @@ bindW (r , s₁) f = f r .fst , s₁ ++ f r .snd
 --   Verifier: Ref _ = Digest
 --   Prover:   Ref c = AFix c
 --
--- destruct peels one layer of a reference, returning the functor applied
+-- unauth peels one layer of a reference, returning the functor applied
 -- to child references. This is where efficiency lives: the prover emits
--- one encoded layer per destruct, not the entire subtree.
+-- one encoded layer per unauth, not the entire subtree.
 
 record Kit : Set₁ where
   field
@@ -221,19 +221,19 @@ record Kit : Set₁ where
     M        : Set → Set
     ret'     : {R : Set} → R → M R
     bind     : {R S : Set} → M R → (R → M S) → M S
-    destruct : (c : Code) → Ref c → M (⟦ c ⟧ (Ref c))
+    unauth : (c : Code) → Ref c → M (⟦ c ⟧ (Ref c))
 
 VerifierKit : Kit
 VerifierKit = record
   { Ref = λ _ → Digest ; M = Comp
   ; ret' = ret ; bind = bindC
-  ; destruct = λ c d → step d (λ v → ret (decode v)) }
+  ; unauth = λ c d → step d (λ v → ret (decode v)) }
 
 ProverKit : Kit
 ProverKit = record
   { Ref = AFix ; M = Writer
   ; ret' = λ r → r , [] ; bind = bindW
-  ; destruct = λ { c (AIn layer) → fmap c fst layer , encode (fmap c snd layer) ∷ [] } }
+  ; unauth = λ { c (AIn layer) → fmap c fst layer , encode (fmap c snd layer) ∷ [] } }
 
 
 -- ================================================================
@@ -253,7 +253,7 @@ module BSTOps (k : Kit) where
 
   {-# TERMINATING #-}
   lookup : ℕ → Ref bstC → M ℕ
-  lookup q ref = bind (destruct bstC ref) go
+  lookup q ref = bind (unauth bstC ref) go
     where
     go : ⟦ bstC ⟧ (Ref bstC) → M ℕ
     go (inl n)           = ret' n
@@ -282,7 +282,7 @@ module AListOps (k : Kit) where
 
   {-# TERMINATING #-}
   index : ℕ → Ref (alistC (Ref bstC)) → M (Maybe (Ref bstC))
-  index i ref = bind (destruct (alistC (Ref bstC)) ref) (go i)
+  index i ref = bind (unauth (alistC (Ref bstC)) ref) (go i)
     where
     go : ℕ → ⟦ alistC (Ref bstC) ⟧ (Ref (alistC (Ref bstC))) → M (Maybe (Ref bstC))
     go i       (inl tt)          = ret' nothing

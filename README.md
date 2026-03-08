@@ -51,7 +51,7 @@ bstC : Code
 bstC = K ℕ ⊕ (I ⊗ K ℕ ⊗ I)    -- leaf n | node left key right
 ```
 
-The prover uses **annotated trees** (`AFix c`) where each child carries `(subtree, digest)`. Operations are written once via a `Kit` record with `Ref : Code → Set` and `destruct`:
+The prover uses **annotated trees** (`AFix c`) where each child carries `(subtree, digest)`. Operations are written once via a `Kit` record with `Ref : Code → Set` and `unauth`:
 
 ```agda
 record Kit : Set₁ where
@@ -60,10 +60,10 @@ record Kit : Set₁ where
     M        : Set → Set
     ret'     : {R : Set} → R → M R
     bind     : {R S : Set} → M R → (R → M S) → M S
-    destruct : (c : Code) → Ref c → M (⟦ c ⟧ (Ref c))
+    unauth : (c : Code) → Ref c → M (⟦ c ⟧ (Ref c))
 ```
 
-The prover's `destruct` emits ONE encoded functor layer per step — O(1), matching real Merkle tree protocols. The verifier's `destruct` checks a hash and decodes. Operations like `lookup` are written once in a parameterized module and work with either kit.
+The prover's `unauth` emits ONE encoded functor layer per step — O(1), matching real Merkle tree protocols. The verifier's `unauth` checks a hash and decodes. Operations like `lookup` are written once in a parameterized module and work with either kit.
 
 ### The trade-off
 
