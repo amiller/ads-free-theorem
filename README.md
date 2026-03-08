@@ -20,31 +20,13 @@ A binary search tree where each node is identified by its hash digest:
 
 **Soundness claim:** if the verifier accepts a wrong answer, then the proof stream contains two different values with the same hash — a collision.
 
-## The generic interface
+## Two approaches
 
-Rather than hardcoding BSTs, we define an `AuthKit` that any data structure can use:
+We present two ways to define generic authenticated data structures, each with different trade-offs.
 
-```agda
-record AuthKit : Set₁ where
-  field
-    Ref    : Set → Set                                  -- authenticated reference
-    M      : Set → Set                                  -- computation monad
-    pure   : {R : Set} → R → M R
-    _>>=_  : {R S : Set} → M R → (R → M S) → M S
-    auth   : {A : Set} → A → Ref A                     -- wrap (hash or keep)
-    unauth : {A : Set} → Ref A → M A                   -- unwrap (verify or return)
-```
+### Approach 1: Parametric AuthKit (`GenericADS.agda`)
 
-Two concrete kits:
-
-| | **Verifier** | **Prover** |
-|---|---|---|
-| `Ref A` | `Digest` | `A` |
-| `M R` | `Comp R` (free monad) | `R × List Val` (writer) |
-| `auth a` | `hash (encode a)` | `a` |
-| `unauth ref` | `step ref (decode ∘ ret)` | `(a, [encode a])` |
-
-A data structure is defined once, polymorphic over `Ref`:
+Define an `AuthKit` record with `Ref : Set → Set` and write data structures polymorphic over `Ref`:
 
 ```agda
 data BST (F : Set → Set) : Set where
@@ -52,16 +34,40 @@ data BST (F : Set → Set) : Set where
   node : F (BST F) → ℕ → F (BST F) → BST F
 ```
 
-Operations use `auth`/`unauth` from any kit:
+This is elegant — write once, instantiate with verifier or prover kit. But it has a fundamental efficiency problem: the prover's `unauth a = (a, [encode a])` serializes the **entire subtree** at each step, making authenticated lookups O(N) instead of O(log N). Atkey's parametricity approach has the same limitation — `unauth : {A} → Ref A → M A` is parametric in `A` and cannot do shallow encoding.
+
+### Approach 2: Polynomial functor codes (`EfficientADS.agda`)
+
+Define data structures as fixpoints of polynomial functor codes:
 
 ```agda
-lookup : (k : AuthKit) → ℕ → Ref (BST Ref) → M ℕ
-lookup k q ref = unauth ref >>= λ where
-  (leaf n)       → pure n
-  (node l key r) → if q < key then lookup k q l else lookup k q r
+data Code : Set₁ where
+  U : Code  ;  K : Set → Code  ;  I : Code
+  _⊕_ _⊗_ : Code → Code → Code
+
+bstC : Code
+bstC = K ℕ ⊕ (I ⊗ K ℕ ⊗ I)    -- leaf n | node left key right
 ```
 
-Instantiate with `VerifierKit` → get a `Comp ℕ` (computation tree of hash-checked lookups). This composes freely: a list of BSTs, a tree of lists, etc. The proof stream is flat `List Val` regardless of the types involved.
+The prover uses **annotated trees** (`AFix c`) where each child carries `(subtree, digest)`. Destruct emits ONE functor layer with digests replacing children — O(1) per step:
+
+```agda
+p-destruct : (c : Code) → AFix c → Writer (⟦ c ⟧ (AFix c))
+p-destruct c (AIn layer) = fmap c fst layer , encode (fmap c snd layer) ∷ []
+```
+
+This matches how real Merkle tree protocols work: the proof stream contains one node per step, with child hashes instead of child subtrees.
+
+### The trade-off
+
+| | **Parametric (GenericADS)** | **Functor codes (EfficientADS)** |
+|---|---|---|
+| Data structure syntax | Natural Agda `data` | Codes: `K ℕ ⊕ (I ⊗ K ℕ ⊗ I)` |
+| Write once? | Yes (polymorphic in Ref) | Separate verifier/prover ops |
+| Prover efficiency | O(N) per query | O(log N) per query |
+| Composition | Free (nest `F`) | Parameterized codes |
+
+A conjectured middle ground: a `deriving`-like mechanism (cf. GHC Generics, or Agda levitation) that extracts polynomial functor codes from ordinary data type definitions. Write a normal `data BST`, get efficient merkleization automatically.
 
 ## The soundness theorem
 
@@ -103,16 +109,18 @@ Atkey [claimed](https://bentnib.org/posts/2016-04-12-authenticated-data-structur
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `agda/GenericADS.agda` | 278 | Main formalization: kit interface, kits, collision extraction, BST, composed list-of-BSTs example. Self-contained, plain Agda, no sorry. |
-| `agda/AtkeyCorrectness.agda` | 388 | Atkey's parametricity claim formalized via agda-bridges. Proves honest computations are pure. Requires cubical Agda + bridges. No sorry. |
+| `agda/EfficientADS.agda` | 313 | Polynomial functor codes, efficient O(log N) prover, collision extraction. Plain Agda, no sorry. |
+| `agda/GenericADS.agda` | 286 | Parametric AuthKit, collision extraction, O(N) prover. Plain Agda, no sorry. |
+| `agda/AtkeyCorrectness.agda` | 388 | Atkey's parametricity claim formalized via agda-bridges. No sorry. |
 | `agda/TinyFreeThms.agda` | — | Warm-up: identity and Church bool free theorems |
 | `agda/Noninterference.agda` | — | Noninterference from parametricity |
 
 ## Development
 
-`GenericADS.agda` is **plain Agda** — any standard Agda installation can typecheck it:
+`EfficientADS.agda` and `GenericADS.agda` are **plain Agda** — any standard Agda installation can typecheck them:
 
 ```bash
+agda agda/EfficientADS.agda
 agda agda/GenericADS.agda
 ```
 
