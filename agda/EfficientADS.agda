@@ -205,18 +205,39 @@ bindW (r , s₁) f = f r .fst , s₁ ++ f r .snd
 
 
 -- ================================================================
--- Verifier destruct and prover destruct
+-- Auth Kit: write operations once, instantiate for prover or verifier
+--
+-- Ref : Code → Set maps each data structure code to its reference type.
+--   Verifier: Ref _ = Digest
+--   Prover:   Ref c = AFix c
+--
+-- destruct peels one layer of a reference, returning the functor applied
+-- to child references. This is where efficiency lives: the prover emits
+-- one encoded layer per destruct, not the entire subtree.
 
-v-destruct : (c : Code) → Digest → Comp (⟦ c ⟧ Digest)
-v-destruct c d = step d (λ v → ret (decode v))
+record Kit : Set₁ where
+  field
+    Ref      : Code → Set
+    M        : Set → Set
+    ret'     : {R : Set} → R → M R
+    bind     : {R S : Set} → M R → (R → M S) → M S
+    destruct : (c : Code) → Ref c → M (⟦ c ⟧ (Ref c))
 
-p-destruct : (c : Code) → AFix c → Writer (⟦ c ⟧ (AFix c))
-p-destruct c (AIn layer) =
-  fmap c fst layer , encode (fmap c snd layer) ∷ []
+VerifierKit : Kit
+VerifierKit = record
+  { Ref = λ _ → Digest ; M = Comp
+  ; ret' = ret ; bind = bindC
+  ; destruct = λ c d → step d (λ v → ret (decode v)) }
+
+ProverKit : Kit
+ProverKit = record
+  { Ref = AFix ; M = Writer
+  ; ret' = λ r → r , [] ; bind = bindW
+  ; destruct = λ { c (AIn layer) → fmap c fst layer , encode (fmap c snd layer) ∷ [] } }
 
 
 -- ================================================================
--- BST example
+-- BST example — written once, works for both kits
 
 bstC : Code
 bstC = K ℕ ⊕ (I ⊗ K ℕ ⊗ I)
@@ -227,87 +248,58 @@ zero  <? suc _ = true
 suc _ <? zero  = false
 suc m <? suc n = m <? n
 
--- Verifier lookup: produces Comp ℕ
-{-# TERMINATING #-}
-v-lookup : ℕ → Digest → Comp ℕ
-v-lookup q d = bindC (v-destruct bstC d) go
-  where
-  go : ⟦ bstC ⟧ Digest → Comp ℕ
-  go (inl n)               = ret n
-  go (inr (l , k , r)) with q <? k
-  ... | true  = v-lookup q l
-  ... | false = v-lookup q r
+module BSTOps (k : Kit) where
+  open Kit k
 
--- Prover lookup: produces Writer ℕ, O(log N) proof stream
-{-# TERMINATING #-}
-p-lookup : ℕ → AFix bstC → Writer ℕ
-p-lookup q at = bindW (p-destruct bstC at) go
-  where
-  go : ⟦ bstC ⟧ (AFix bstC) → Writer ℕ
-  go (inl n)               = n , []
-  go (inr (l , k , r)) with q <? k
-  ... | true  = p-lookup q l
-  ... | false = p-lookup q r
+  {-# TERMINATING #-}
+  lookup : ℕ → Ref bstC → M ℕ
+  lookup q ref = bind (destruct bstC ref) go
+    where
+    go : ⟦ bstC ⟧ (Ref bstC) → M ℕ
+    go (inl n)           = ret' n
+    go (inr (l , n , r)) with q <? n
+    ... | true  = lookup q l
+    ... | false = lookup q r
 
--- Soundness: two proof streams, same digest, different results → collision
 bst-soundness : (q : ℕ) (root : Digest)
   (s₁ s₂ : List Val) {r₁ r₂ : ℕ} {s₁' s₂' : List Val}
-  → run (v-lookup q root) s₁ ≡ ok r₁ s₁'
-  → run (v-lookup q root) s₂ ≡ ok r₂ s₂'
+  → run (BSTOps.lookup VerifierKit q root) s₁ ≡ ok r₁ s₁'
+  → run (BSTOps.lookup VerifierKit q root) s₂ ≡ ok r₂ s₂'
   → (r₁ ≡ r₂ → ⊥)
   → Collision
-bst-soundness q root = extract (v-lookup q root)
+bst-soundness q root = extract (BSTOps.lookup VerifierKit q root)
 
 
 -- ================================================================
--- Composed example: list of BSTs
---
--- AList is parameterized by the BST reference type:
---   Verifier: alistC Digest     (BST refs are digests)
---   Prover:   alistC (AFix bstC) (BST refs are annotated trees)
+-- Composed example: list of BSTs — also written once
 
 alistC : Set → Code
 alistC R = U ⊕ (K R ⊗ I)
 
--- Verifier: index into list, then lookup in BST
-{-# TERMINATING #-}
-v-index : ℕ → Digest → Comp (Maybe Digest)
-v-index i d = bindC (v-destruct (alistC Digest) d) (go i)
-  where
-  go : ℕ → ⟦ alistC Digest ⟧ Digest → Comp (Maybe Digest)
-  go i       (inl tt)          = ret nothing
-  go zero    (inr (bst , _))   = ret (just bst)
-  go (suc n) (inr (_   , tl))  = v-index n tl
+module AListOps (k : Kit) where
+  open Kit k
+  open BSTOps k using (lookup)
 
-v-lookupAt : ℕ → ℕ → Digest → Comp (Maybe ℕ)
-v-lookupAt i q root = bindC (v-index i root) go
-  where
-  go : Maybe Digest → Comp (Maybe ℕ)
-  go nothing    = ret nothing
-  go (just bst) = bindC (v-lookup q bst) (λ n → ret (just n))
+  {-# TERMINATING #-}
+  index : ℕ → Ref (alistC (Ref bstC)) → M (Maybe (Ref bstC))
+  index i ref = bind (destruct (alistC (Ref bstC)) ref) (go i)
+    where
+    go : ℕ → ⟦ alistC (Ref bstC) ⟧ (Ref (alistC (Ref bstC))) → M (Maybe (Ref bstC))
+    go i       (inl tt)          = ret' nothing
+    go zero    (inr (bst , _))   = ret' (just bst)
+    go (suc n) (inr (_   , tl))  = index n tl
 
--- Prover: index into annotated list, then lookup in annotated BST
-{-# TERMINATING #-}
-p-index : ℕ → AFix (alistC (AFix bstC)) → Writer (Maybe (AFix bstC))
-p-index i at = bindW (p-destruct (alistC (AFix bstC)) at) (go i)
-  where
-  go : ℕ → ⟦ alistC (AFix bstC) ⟧ (AFix (alistC (AFix bstC))) → Writer (Maybe (AFix bstC))
-  go i       (inl tt)          = nothing , []
-  go zero    (inr (bst , _))   = just bst , []
-  go (suc n) (inr (_   , tl))  = p-index n tl
+  lookupAt : ℕ → ℕ → Ref (alistC (Ref bstC)) → M (Maybe ℕ)
+  lookupAt i q ref = bind (index i ref) go
+    where
+    go : Maybe (Ref bstC) → M (Maybe ℕ)
+    go nothing    = ret' nothing
+    go (just bst) = bind (lookup q bst) (λ n → ret' (just n))
 
-p-lookupAt : ℕ → ℕ → AFix (alistC (AFix bstC)) → Writer (Maybe ℕ)
-p-lookupAt i q root = bindW (p-index i root) go
-  where
-  go : Maybe (AFix bstC) → Writer (Maybe ℕ)
-  go nothing    = nothing , []
-  go (just bst) = bindW (p-lookup q bst) (λ n → just n , [])
-
--- Soundness for composed lookups
 alist-soundness : (i q : ℕ) (root : Digest)
   (s₁ s₂ : List Val) {r₁ r₂ : Maybe ℕ} {s₁' s₂' : List Val}
-  → run (v-lookupAt i q root) s₁ ≡ ok r₁ s₁'
-  → run (v-lookupAt i q root) s₂ ≡ ok r₂ s₂'
+  → run (AListOps.lookupAt VerifierKit i q root) s₁ ≡ ok r₁ s₁'
+  → run (AListOps.lookupAt VerifierKit i q root) s₂ ≡ ok r₂ s₂'
   → (r₁ ≡ r₂ → ⊥)
   → Collision
-alist-soundness i q root = extract (v-lookupAt i q root)
+alist-soundness i q root = extract (AListOps.lookupAt VerifierKit i q root)
