@@ -1,6 +1,8 @@
-# Generic Authenticated Data Structures
+# Authenticated Data Structures, Generically
 
-Soundness proof for authenticated data structures in Agda: if an adversary fools the verifier, we extract a hash collision. The formalization provides a generic `AuthKit` interface — write a data structure once, get prover and verifier for free — and proves soundness for any program built against it.
+Agda formalization of soundness for authenticated data structures (generalized Merkle trees). The main theorem is **collision extraction**: if a verifier accepts two different results for the same query, we extract two distinct values with the same hash. This is the standard cryptographic security reduction, formalized as structural induction on a free monad of hash-checked lookups.
+
+We compare two approaches to making this generic — parametric abstraction over references (following Atkey 2016) vs. polynomial functor codes — and show that only the latter produces efficient provers matching real Merkle tree protocols.
 
 ## The Merkle BST protocol
 
@@ -18,7 +20,7 @@ A binary search tree where each node is identified by its hash digest:
 
 **Verifier** holds only the root digest. It replays the traversal: for each step, it pops a node from the proof stream, checks `hash(node) == expected digest`, then descends into the appropriate child digest.
 
-**Soundness claim:** if the verifier accepts a wrong answer, then the proof stream contains two different values with the same hash — a collision.
+**Soundness:** if the verifier accepts two different answers for the same root digest, the two proof streams contain a pair of distinct values with the same hash.
 
 ## Two approaches
 
