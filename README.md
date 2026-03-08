@@ -51,25 +51,30 @@ bstC : Code
 bstC = K ℕ ⊕ (I ⊗ K ℕ ⊗ I)    -- leaf n | node left key right
 ```
 
-The prover uses **annotated trees** (`AFix c`) where each child carries `(subtree, digest)`. Destruct emits ONE functor layer with digests replacing children — O(1) per step:
+The prover uses **annotated trees** (`AFix c`) where each child carries `(subtree, digest)`. Operations are written once via a `Kit` record with `Ref : Code → Set` and `destruct`:
 
 ```agda
-p-destruct : (c : Code) → AFix c → Writer (⟦ c ⟧ (AFix c))
-p-destruct c (AIn layer) = fmap c fst layer , encode (fmap c snd layer) ∷ []
+record Kit : Set₁ where
+  field
+    Ref      : Code → Set
+    M        : Set → Set
+    ret'     : {R : Set} → R → M R
+    bind     : {R S : Set} → M R → (R → M S) → M S
+    destruct : (c : Code) → Ref c → M (⟦ c ⟧ (Ref c))
 ```
 
-This matches how real Merkle tree protocols work: the proof stream contains one node per step, with child hashes instead of child subtrees.
+The prover's `destruct` emits ONE encoded functor layer per step — O(1), matching real Merkle tree protocols. The verifier's `destruct` checks a hash and decodes. Operations like `lookup` are written once in a parameterized module and work with either kit.
 
 ### The trade-off
 
 | | **Parametric (GenericADS)** | **Functor codes (EfficientADS)** |
 |---|---|---|
 | Data structure syntax | Natural Agda `data` | Codes: `K ℕ ⊕ (I ⊗ K ℕ ⊗ I)` |
-| Write once? | Yes (polymorphic in Ref) | Separate verifier/prover ops |
+| Write once? | Yes (polymorphic in Ref) | Yes (parameterized by Kit) |
 | Prover efficiency | O(N) per query | O(log N) per query |
 | Composition | Free (nest `F`) | Parameterized codes |
 
-A conjectured middle ground: a `deriving`-like mechanism (cf. GHC Generics, or Agda levitation) that extracts polynomial functor codes from ordinary data type definitions. Write a normal `data BST`, get efficient merkleization automatically.
+Both are write-once, but only the functor code approach produces efficient provers. The cost is uglier data structure definitions. A conjectured middle ground: a `deriving`-like mechanism (cf. GHC Generics, or Agda levitation) that extracts polynomial functor codes from ordinary data type definitions.
 
 ## The soundness theorem
 
